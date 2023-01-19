@@ -43,6 +43,41 @@ SegmentSpL <- function(sl, length = 0, n.parts = 0, merge.last = FALSE) {
   return(SpatialLines(newlines))
 }
 
+#' Segmentation of SpatialLines object into muliple segments using dataframes and simplified from Segment SpLDf
+#'
+#' Segment a SpatialLines object in segment of equal length (taken from: http://rstudio-pubs-static.s3.amazonaws.com/10685_1f7266d60db7432486517a111c76ac8b.html)
+#' @param sl SpatialLines object
+#' @param length Length of individual segment (in units of sl)
+#' @keywords SegmentSpL CreateSegment CreateSegments
+#' @return A SpatialLinesDataFrame object
+#' @export
+SegmentSpLDf <- function(sl, length) {
+  id <- 1
+  newlines <- list()
+  newdata<-data.frame()
+  for(i in (1:nrow(sl))){
+    objectid<-sl@data[i,]$OBJECTID
+    data<-sl@data[i,]
+    data$ID<-id
+    lines<-sl@lines[[i]]
+    for (line in lines@Lines) {
+      crds <- line@coords
+      # create segments
+      segments <- CreateSegmentsDf(coords = crds, length)
+      
+      # transform segments to lineslist for SpatialLines object
+      for (segment in segments) {
+        newlines <- c(newlines, Lines(list(Line(unlist(segment))), ID = as.character(id)))
+        newdata<-rbind(newdata,data)
+        id<-id+1
+      }
+    }
+  }
+  
+  df<-SpatialLinesDataFrame(sl=SpatialLines(newlines),data=newdata,match.ID = F)
+  return(df)
+}
+
 CreateSegment <- function(coords, from, to) {
   distance <- 0
   coordsOut <- c()
@@ -105,6 +140,28 @@ MergeLast <- function(lst) {
   lst <- lst[1:(l - 1)]
   return(lst)
 }
+
+# a modification of CreateSegments to retain more metadata and work with the modified function SegmentSpLDf
+CreateSegmentsDf <- function(coords, length) {
+  # calculate total length line
+  total_length <- 0
+  for (i in 1:(nrow(coords) - 1)) {
+    d <- sqrt((coords[i, 1] - coords[i + 1, 1])^2 + (coords[i, 2] - coords[i + 1, 2])^2)
+    total_length <- total_length + d
+  }
+  
+  # calculate stationing of segments
+  stationing <- c(seq(from = 0, to = total_length, by = length), total_length)
+  
+  # calculate segments and store them in list
+  newlines <- list()
+  for (i in 1:(length(stationing) - 1)) {
+    newlines[[i]] <- CreateSegment(coords, stationing[i], stationing[i + 1])
+  }
+  
+  return(newlines)
+}
+
 
 ####################################
 # Intersect 
