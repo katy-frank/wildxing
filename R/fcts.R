@@ -200,6 +200,160 @@ corriIntersects<-function(traj, corri, per_day=TRUE, plot=F) {
   return(out)  
 }
 
+# modified version of the above, plus helper functions, to work with dataframes/retain additional metadata
+# these changes are fairly specific to our use case
+corriIntersectsDf<-function(traj, corri, per_day=TRUE, plot=F) {
+  data<-adehabitatLT::ld(traj)
+  data2<-na.omit(data.frame(v1=data[,1],v2=data[,2], v3=data[,1]+data[,4],v4=data[,2]+data[,5],timestamp=as.POSIXct(data[,3]),dt=data$dt))
+  data2$id<-uuid::UUIDgenerate(n=nrow(data2))
+ 
+  steps<-makeSteps(data2)
+  steps.sp<-SpatialLinesDataFrame(steps,data2,match.ID="id")
+  inter<-rgeos::gIntersects(corri, steps.sp, byid=T)
+  speed_limit<-corri$SPEED_LMT
+  aadt<-corri$DOT_AADT
+  pct_denom<-sum(na.omit(data)$dt)/3600/24
+  pct<-colSums(inter)/(sum(na.omit(data)$dt)/3600/24)
+  
+  out<-makeSPDF(corri,inter,steps.sp,pct_denom)
+  if(plot==T) {plotcorri_ind(out, extent=raster::extent(steps))}
+  return(out)  
+}
+
+makeSteps<-function(data.input){
+  linesList<-list()
+  for(i in (1:nrow(data.input))){
+    data.m<-as.matrix(data.input[i,1:4])
+    linesList<-list.append(linesList,Lines(list(Line(cbind(data.m[c(1,3)],data.m[c(2,4)]))),data.input[i,7]))
+  }
+  return(SpatialLines(linesList))
+}
+
+makeSPDF<-function(corri,inter,steps.sp,pct_denom){
+  # each col of inter is a different road seg in corri- each row a diff deer loc
+  out <- data.frame(row.names = c("count","pct","speed_limit","aadt","cross","count_day","count_night","count_crep","pct_day","pct_night","pct_crep"))
+  
+  denomDay<-0
+  denomNight<-0
+  denomCrep<-0
+  for(j in (1:nrow(inter))){ # for each step 
+    # denominators are made up of the sum of all steps' dt, even if not associated with a crossing
+    # sort sums of dt by time of day
+    time<-as.POSIXct(steps.sp[j,5]$timestamp)
+    xy<-cbind(steps.sp[j,1]$v1,steps.sp[j,2]$v2)
+    Deerloc<- as.matrix(xy)
+    sunpos<-solarpos(Deerloc,as.POSIXct(time))[,2]
+     
+    if(sunpos < 20 & sunpos > -20){
+      denomCrep<-ifelse(!is.na(steps.sp[j,6]$dt),denomCrep+steps.sp[j,6]$dt,denomCrep)
+    }
+    if(sunpos >= 20){
+      denomDay<-ifelse(!is.na(steps.sp[j,6]$dt),denomDay+steps.sp[j,6]$dt,denomDay)
+    }
+    if(sunpos <=-20){
+      denomNight<-ifelse(!is.na(steps.sp[j,6]$dt),denomNight+steps.sp[j,6]$dt,denomNight)
+    }
+  } # check all deer steps
+  #pct denom day
+  pct_d_day <- denomDay/3600/24
+  pct_d_night <- denomNight/3600/24
+  pct_d_crep <- denomCrep/3600/24
+  
+  for(i in (1:nrow(corri))){
+    crossed<-ifelse(sum(inter[,i])>0,1,0)
+    countDay<-0
+    countNight<-0
+    countCrep<-0
+    if(crossed == 1){
+      for(j in (1:nrow(inter))){
+        # then if it was a crossing, add to the count
+        if(inter[j,i]==1){
+          time<-as.POSIXct(steps.sp[j,5]$timestamp)
+          xy<-cbind(steps.sp[j,1]$v1,steps.sp[j,2]$v2)
+          Deerloc<- as.matrix(xy)
+          sunpos<-solarpos(Deerloc,as.POSIXct(time))[,2]
+          
+          if(sunpos < 20 & sunpos > -20){
+            countCrep<-countCrep+1
+          }
+          if(sunpos >= 20){
+            countDay<-countDay+1
+          }
+          if(sunpos <=-20){
+            countNight<-countNight+1
+          }
+        } # this deer step is a crossing
+      } # check all deer steps
+    } # this road segs was crossed
+    
+    out <- rbind(out,data.frame(count=sum(inter[,i]),
+                                pct=sum(inter[,i])/pct_denom,
+                                speed_limit=corri$SPEED_LMT[i],
+                                aadt=corri$DOT_AADT[i],
+                                cross=crossed,
+                                count_day=countDay,
+                                count_night=countNight,
+                                count_crep=countCrep,
+                                pct_day=countDay/pct_d_day,
+                                pct_night=countNight/pct_d_night,
+                                pct_crep=countCrep/pct_d_crep
+    ))
+  } # check all road segs
+  
+  return(SpatialLinesDataFrame(corri,out))
+} #function end
+
+avg_inds_modified<-function(SpLlst) {
+  count_mean<-rowMeans(sapply(SpLlst, function(x) x$count))
+  count_sum<-rowSums(sapply(SpLlst, function(x) x$count))
+  pct_mean_0<-rowMeans(sapply(SpLlst, function(x) x$pct))
+  speed_limit<-rowMeans(sapply(SpLlst,function(x) x$speed_limit))
+  aadt<-rowMeans(sapply(SpLlst,function(x) x$aadt))
+  
+  count_day_sum<-rowSums(sapply(SpLlst, function(x) x$count_day))
+  count_night_sum<-rowSums(sapply(SpLlst, function(x) x$count_night))
+  count_crep_sum<-rowSums(sapply(SpLlst, function(x) x$count_crep))
+  
+  tt<-sapply(SpLlst, function(x) x$pct)
+  tt<-ifelse(tt==0, NA, tt)
+  pct_mean<-rowMeans(tt, na.rm=T)
+  pct_mean[is.na(pct_mean)]<-0
+  
+  tt<-sapply(SpLlst, function(x) x$pct_day)
+  tt<-ifelse(tt==0, NA, tt)
+  pct_mean_day<-rowMeans(tt, na.rm=T)
+  pct_mean_day[is.na(pct_mean_day)]<-0
+  
+  tt<-sapply(SpLlst, function(x) x$pct_night)
+  tt<-ifelse(tt==0, NA, tt)
+  pct_mean_night<-rowMeans(tt, na.rm=T)
+  pct_mean_night[is.na(pct_mean_night)]<-0
+  
+  tt<-sapply(SpLlst, function(x) x$pct_crep)
+  tt<-ifelse(tt==0, NA, tt)
+  pct_mean_crep<-rowMeans(tt, na.rm=T)
+  pct_mean_crep[is.na(pct_mean_crep)]<-0
+  
+  nb_ind<-rowSums(sapply(SpLlst, function(x) x$cross))
+  tt2<-apply(sapply(SpLlst, function(x) x$cross), 1, function(x) which(x>0))
+  tt3<-lapply(tt2, length)
+  id<-ifelse(tt3==0, "None", "Multi")
+  id[which(tt3==1)]<-unlist(tt2[which(tt3==1)])
+  return(SpatialLinesDataFrame(SpLlst[[1]], data.frame(count_mean, count_sum, pct_mean_0, pct_mean, 
+                                                       nb_ind, speed_limit,aadt,id,
+                                                       pct_mean_day,count_day_sum,
+                                                       pct_mean_night,count_night_sum,
+                                                       pct_mean_crep,count_crep_sum), match.ID=F))
+}
+
+# adapted to work for us from the plotting/aggregating functions below                 
+create_plottable_data<-function(track_ids,ltraj,seg_roads){
+  num_ids<-length(unique(track_ids))
+  tempall<-(lapply(1:num_ids, function(x) corriIntersects(ltraj[x], seg_roads)))
+  plottable<-avg_inds_modified(tempall)
+  return(plottable)
+}
+
 #' Plot of density of crossing of an individual with linear features 
 #'
 #' Produce a color-coded plot of density of crossing of an individual with a segmented linear features. Used to display result of function corriIntersects
